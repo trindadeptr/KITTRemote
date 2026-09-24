@@ -398,6 +398,35 @@ final class DirectVoiceLifecycleTests: XCTestCase {
         XCTAssertEqual(model.transcript.map(\.text), ["Carry on", "Carry on please"])
     }
 
+    @MainActor
+    func testLateFaceEventsWithoutOwnedVoiceDoNotChangeState() {
+        let model = DirectVoiceSessionModel(
+            liveActivityPublisher: RecordingLiveActivityPublisher()
+        )
+        XCTAssertFalse(model.hasOwnedVoice)
+        let lateMessages: [[String: Any]] = [
+            ["type": "session", "state": "live"],
+            ["type": "event", "kind": "speech-started"],
+            ["type": "event", "kind": "speech-stopped"],
+            ["type": "event", "kind": "delegation-started"],
+            ["type": "event", "kind": "assistant-speaking"],
+            ["type": "event", "kind": "assistant-done"],
+        ]
+        // Already-queued WebKit media events can arrive after a native stop
+        // or failure. They must not resurrect a session, and must never hide
+        // an uncertain outcome that still needs reconciliation.
+        let guardedStates: [DirectVoiceSessionState] = [
+            .ready, .unavailable, .connecting, .stopping, .outcomeUnknown, .failed,
+        ]
+        for state in guardedStates {
+            for message in lateMessages {
+                model.state = state
+                model.handleEventMessage(message)
+                XCTAssertEqual(model.state, state, "\(message) changed \(state)")
+            }
+        }
+    }
+
 }
 
 @MainActor
