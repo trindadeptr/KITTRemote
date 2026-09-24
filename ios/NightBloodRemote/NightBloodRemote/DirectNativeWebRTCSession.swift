@@ -10,6 +10,7 @@ enum DirectNativeWebRTCError: LocalizedError {
     case answerFailed(String)
     case connectionTimedOut
     case connectionFailed
+    case connectionLost
 
     var errorDescription: String? {
         switch self {
@@ -27,12 +28,18 @@ enum DirectNativeWebRTCError: LocalizedError {
             "The car audio connection did not open in time."
         case .connectionFailed:
             "The car audio connection failed."
+        case .connectionLost:
+            "The car audio connection was lost."
         }
     }
 }
 
 @MainActor
 protocol DirectNativeVoiceMediaControlling: AnyObject {
+    /// Called at most once, on the main actor, when media that had already
+    /// connected is lost: the peer fails or closes, or stays disconnected
+    /// beyond a short grace period. Never called after `close()`.
+    var onConnectionLost: (@MainActor (String) -> Void)? { get set }
     func makeOffer() async throws -> String
     func acceptAnswer(_ sdp: String) async throws
     func playReadyCue(character: DirectFaceSkin, sound: DirectReadySound) async
@@ -72,6 +79,10 @@ final class DirectNativeWebRTCSession: NSObject,
     private var connectionContinuation: CheckedContinuation<Void, any Error>?
     private var connectionTimeout: Task<Void, Never>?
     private var closed = false
+    private var hasConnected = false
+    private var didReportConnectionLoss = false
+    private var disconnectGrace: Task<Void, Never>?
+    var onConnectionLost: (@MainActor (String) -> Void)?
     private let readyCue = DirectVoiceReadyCuePlayer()
     private var didPlayReadyCue = false
 
@@ -208,6 +219,9 @@ final class DirectNativeWebRTCSession: NSObject,
     func close() {
         guard !closed else { return }
         closed = true
+        onConnectionLost = nil
+        disconnectGrace?.cancel()
+        disconnectGrace = nil
         readyCue.stop()
         iceTimeout?.cancel()
         iceTimeout = nil
@@ -273,7 +287,10 @@ final class DirectNativeWebRTCSession: NSObject,
     }
 
     private func waitForConnection() async throws {
-        if peer.connectionState == .connected { return }
+        if peer.connectionState == .connected {
+            hasConnected = true
+            return
+        }
         guard peer.connectionState != .failed,
               peer.connectionState != .closed
         else {
@@ -344,26 +361,71 @@ final class DirectNativeWebRTCSession: NSObject,
         didChange newState: RTCPeerConnectionState
     ) {
         Task { @MainActor [weak self] in
-            guard let self, let continuation = self.connectionContinuation else {
-                return
-            }
+            self?.handleConnectionState(newState)
+        }
+    }
+
+    private func handleConnectionState(_ newState: RTCPeerConnectionState) {
+        guard !closed else { return }
+        if let continuation = connectionContinuation {
             switch newState {
             case .connected:
-                self.connectionContinuation = nil
-                self.connectionTimeout?.cancel()
-                self.connectionTimeout = nil
+                connectionContinuation = nil
+                connectionTimeout?.cancel()
+                connectionTimeout = nil
+                hasConnected = true
                 continuation.resume()
             case .failed, .closed:
-                self.connectionContinuation = nil
-                self.connectionTimeout?.cancel()
-                self.connectionTimeout = nil
+                connectionContinuation = nil
+                connectionTimeout?.cancel()
+                connectionTimeout = nil
                 continuation.resume(
                     throwing: DirectNativeWebRTCError.connectionFailed
                 )
             default:
                 break
             }
+            return
         }
+        // After the first connection, mirror the web face: a failed or
+        // closed peer is terminal, and a disconnect that does not recover
+        // within 2.5 seconds is treated as lost car audio.
+        guard hasConnected else { return }
+        switch newState {
+        case .connected:
+            disconnectGrace?.cancel()
+            disconnectGrace = nil
+        case .disconnected:
+            guard disconnectGrace == nil else { return }
+            disconnectGrace = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .milliseconds(2_500))
+                } catch {
+                    return
+                }
+                guard let self, !self.closed else { return }
+                self.disconnectGrace = nil
+                guard self.peer.connectionState != .connected else { return }
+                self.reportConnectionLost()
+            }
+        case .failed, .closed:
+            reportConnectionLost()
+        default:
+            break
+        }
+    }
+
+    private func reportConnectionLost() {
+        guard !closed, !didReportConnectionLoss else { return }
+        didReportConnectionLoss = true
+        disconnectGrace?.cancel()
+        disconnectGrace = nil
+        let handler = onConnectionLost
+        onConnectionLost = nil
+        handler?(
+            DirectNativeWebRTCError.connectionLost.errorDescription
+                ?? "The car audio connection was lost."
+        )
     }
 
     nonisolated func peerConnection(

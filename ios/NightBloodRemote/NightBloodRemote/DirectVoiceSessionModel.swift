@@ -852,6 +852,17 @@ final class DirectVoiceSessionModel {
         do {
             let media = try nativeMediaFactory.makeSession()
             nativeMedia = media
+            // The media reports only losses after its first connection, so
+            // wiring here also covers a drop during the ready cue.
+            let generation = grant.lifecycleGeneration
+            media.onConnectionLost = { [weak self, weak media] detail in
+                guard let self, let media else { return }
+                self.handleNativeMediaConnectionLost(
+                    media,
+                    lifecycleGeneration: generation,
+                    detail: detail
+                )
+            }
             // Connection preparation is already running from the gesture.
             // Await the media branch here so an offer failure cancels that
             // preparation promptly, before any realtime start is possible.
@@ -927,6 +938,28 @@ final class DirectVoiceSessionModel {
                 lastError = error.localizedDescription
             }
         }
+    }
+
+    /// Native CarPlay counterpart of the web face's `session`/`error` event:
+    /// connected car audio was lost, so end the realtime session once through
+    /// the shared stop owner instead of leaving Listening on screen.
+    private func handleNativeMediaConnectionLost(
+        _ media: any DirectNativeVoiceMediaControlling,
+        lifecycleGeneration generation: UInt64,
+        detail: String
+    ) {
+        guard nativeMedia === media,
+              generation == lifecycleGeneration,
+              let voice
+        else { return }
+        cancelStartupWatchdog()
+        oneShotStartGrant = nil
+        awaitingMediaReady = false
+        advanceLifecycleGeneration()
+        lastError = detail
+        media.close()
+        state = .stopping
+        _ = beginStop(for: voice, terminalError: detail)
     }
 
     /// The only mutating entry point callable from JavaScript. It consumes the

@@ -527,6 +527,7 @@ private final class CarPlayNativeMediaSpy: DirectNativeVoiceMediaControlling {
     private(set) var makeOfferCalls = 0
     private(set) var wasClosed = false
     private(set) var inputMuted = false
+    var onConnectionLost: (@MainActor (String) -> Void)?
 
     init(offerError: (any Error)? = nil, suspendOffer: Bool = false) {
         self.offerError = offerError
@@ -553,6 +554,7 @@ private final class CarPlayNativeMediaSpy: DirectNativeVoiceMediaControlling {
 
     func close() {
         wasClosed = true
+        onConnectionLost = nil
     }
 }
 
