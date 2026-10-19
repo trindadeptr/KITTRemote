@@ -1003,7 +1003,11 @@ final class DirectVoiceSessionModel {
             throw error
         }
         guard preparedStartID == grant.id, let preparedStart else {
-            throw DirectVoiceSessionError.sessionAlreadyOwned
+            // The grant and offer watchdog are already consumed, so nothing
+            // else would leave Connecting. Settle this generation visibly.
+            let error = DirectVoiceSessionError.sessionAlreadyOwned
+            failPreparedStart(grant, error: error.localizedDescription)
+            throw error
         }
 
         activeStartOperationID = grant.id
