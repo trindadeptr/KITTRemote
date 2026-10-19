@@ -1164,6 +1164,12 @@ final class DirectVoiceSessionModel {
         case "session":
             guard let eventState = message["state"] as? String else { return }
             if eventState == "live" {
+                // WebKit can deliver an already-queued media event after a
+                // native stop or failure. Only an owned session that is
+                // connecting (or already interactive) may become live.
+                guard voice != nil,
+                      state == .connecting || state.mayContinueInBackground
+                else { return }
                 let firstReady = awaitingMediaReady
                 tracePerformance("microphone.ready")
                 cancelStartupWatchdog()
@@ -1217,6 +1223,9 @@ final class DirectVoiceSessionModel {
                     }.joined(separator: " ")
                 Self.performanceLog.info("voice id=\(self.performanceID.uuidString, privacy: .public) metrics=\(numeric, privacy: .public)")
             }
+            // Late face events must never move the model out of stopping,
+            // an uncertain outcome, failure or idle states.
+            guard voice != nil, state.mayContinueInBackground else { return }
             switch kind {
             case "speech-started":
                 awaitingAssistant = false
