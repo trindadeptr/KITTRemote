@@ -1191,14 +1191,7 @@ actor CodexRemoteVoiceTransport {
         preserveActiveSession: Bool = false
     ) async {
         applicationForeground = false
-        if preserveActiveSession,
-           state == .started,
-           serverStarted,
-           !realtimeClosed,
-           connection != nil,
-           !transportClosed,
-           !closing
-        {
+        if preserveActiveSession, canPreserveActiveSessionInBackground {
             backgroundSessionContinuation = true
             return
         }
@@ -1229,6 +1222,15 @@ actor CodexRemoteVoiceTransport {
             || state == .startOutcomeUnknown
             || state == .stopOutcomeUnknown,
             sendClientClosed: false)
+    }
+
+    private var canPreserveActiveSessionInBackground: Bool {
+        state == .started
+            && serverStarted
+            && !realtimeClosed
+            && connection != nil
+            && !transportClosed
+            && !closing
     }
 
     func applicationDidBecomeActive() {
@@ -1341,13 +1343,21 @@ actor CodexRemoteVoiceTransport {
                 if applicationForeground,
                    !(await foregroundProvider.isApplicationActive())
                 {
+                    // A started session is preserved without suspending, so
+                    // this task keeps its handle and continues heartbeating.
+                    // Any other state tears down with a bounded stop; release
+                    // ownership first so that teardown cannot cancel the task
+                    // running it and fail the stop's waits immediately.
+                    guard canPreserveActiveSessionInBackground else {
+                        heartbeatTask = nil
+                        await applicationDidEnterBackground(
+                            preserveActiveSession: false
+                        )
+                        return
+                    }
                     await applicationDidEnterBackground(
                         preserveActiveSession: true
                     )
-                    if transportClosed {
-                        heartbeatTask = nil
-                        return
-                    }
                 }
                 guard applicationForeground || backgroundSessionContinuation
                 else {
