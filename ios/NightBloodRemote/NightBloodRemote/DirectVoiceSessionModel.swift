@@ -1902,10 +1902,11 @@ private final class DirectBackgroundLease: @unchecked Sendable {
         identifier = UIApplication.shared.beginBackgroundTask(
             withName: "Close private Codex Voice"
         ) { [weak self] in
-            Task {
-                await onExpiration()
-                await MainActor.run { self?.end() }
-            }
+            // UIKit calls this on the main thread and requires the task to
+            // end before the handler returns. Closing the transport is
+            // best-effort, so it runs afterwards without holding the lease.
+            Task { await onExpiration() }
+            MainActor.assumeIsolated { self?.end() }
         }
     }
 
